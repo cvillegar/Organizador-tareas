@@ -18,14 +18,13 @@ os.makedirs(CARPETA_SOPORTES, exist_ok=True)
 if os.path.exists(ARCHIVO):
     df = pd.read_csv(ARCHIVO)
 else:
-    df = pd.DataFrame(columns=["Tarea", "Responsable", "Prioridad", "Estado", "Fecha Límite", "Soporte"])
-# Normalizar columna Estado
-if "Estado" in df.columns:
-    df["Estado"] = df["Estado"].astype(str).str.strip().str.capitalize()
+    df = pd.DataFrame(columns=["Tarea", "Responsable", "Fecha Límite", "Soporte", "Prioridad", "Estado", "Finalizada"])
 
-# Asegurar que la columna Soporte exista
+# Asegurar que la columna Soporte y Finalizada existan
 if "Soporte" not in df.columns:
     df["Soporte"] = ""
+if "Finalizada" not in df.columns:
+    df["Finalizada"] = False
 
 # ==========================
 # Interfaz Streamlit
@@ -45,7 +44,16 @@ else:
 
 # --- Mostrar tabla ---
 st.subheader("📊 Tareas registradas")
-st.dataframe(df_filtrado)
+# Verificar si la columna "Prioridad" existe antes de intentar eliminarla
+if "Prioridad" in df.columns:
+    df_filtrado_sin_prioridad = df_filtrado.drop(columns=["Prioridad"])  # Eliminar columna de prioridad
+else:
+    df_filtrado_sin_prioridad = df_filtrado  # Si no existe, simplemente no la eliminamos
+
+# Mostrar el DataFrame resultante
+st.dataframe(df_filtrado_sin_prioridad)
+
+
 
 # ==========================
 # Zona de informes
@@ -57,33 +65,27 @@ if not df.empty:
     df["Fecha Límite"] = pd.to_datetime(df["Fecha Límite"], errors="coerce")
     hoy = date.today()
 
-    # Número de tareas por persona
-    tareas_por_persona = df["Responsable"].value_counts()
+    # Filtrar tareas activas (sin estar finalizadas y con fecha válida)
+    tareas_activas = df[(df["Fecha Límite"] >= pd.to_datetime(hoy)) & 
+                        (df["Finalizada"] == False) & 
+                        (df["Fecha Límite"].notna())]  # Asegurarse que la fecha no sea NaT
 
-    # Número de tareas por prioridad
-    tareas_por_prioridad = df["Prioridad"].value_counts()
+    # Número de tareas vencidas (sin estar finalizadas y con fecha válida)
+    vencidas = df[(df["Fecha Límite"] < pd.to_datetime(hoy)) & 
+                  (df["Finalizada"] == False) & 
+                  (df["Fecha Límite"].notna())]  # Asegurarse que la fecha no sea NaT
 
-    # Número de tareas vencidas
-    vencidas = df[(df["Fecha Límite"] < pd.to_datetime(hoy)) & (df["Estado"] != "Terminado")]
-
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        st.metric("👥 Total Tareas", len(df))
+        st.metric("👥 Total Tareas activas", len(tareas_activas))
     with col2:
-     pendientes = df[df["Estado"] == "Pendiente"]
-     st.metric("⚡ Pendientes", len(pendientes))
+        st.metric("⏳ Tareas vencidas", len(vencidas))
 
-    with col3:
-        st.metric("⏳ Vencidas", len(vencidas))
 
     # Gráfico: tareas por persona
     st.write("### 👤 Tareas por persona")
+    tareas_por_persona = df["Responsable"].value_counts()
     st.bar_chart(tareas_por_persona)
-
-    # Gráfico: tareas por prioridad
-    st.write("### ⚡ Distribución por prioridad")
-    fig = px.pie(df, names="Prioridad", title="Prioridad de tareas")
-    st.plotly_chart(fig)
 
 # ==========================
 # Formulario para nueva tarea
@@ -92,8 +94,6 @@ st.subheader("➕ Agregar nueva tarea")
 with st.form("nueva_tarea"):
     tarea = st.text_input("Descripción de la tarea")
     responsable = st.selectbox("Asignar a:", PERSONAS, key="nuevo_responsable")
-    prioridad = st.selectbox("Prioridad", ["Alta", "Media", "Baja"], key="nueva_prioridad")
-    estado = st.selectbox("Estado", ["Pendiente", "En curso", "Terminado"], key="nuevo_estado")
     fecha = st.date_input("Fecha límite")
     soporte = st.file_uploader("📎 Adjuntar soporte", type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"], key="nuevo_soporte")
 
@@ -106,63 +106,54 @@ with st.form("nueva_tarea"):
             with open(soporte_path, "wb") as f:
                 f.write(soporte.getbuffer())
 
-        nueva = pd.DataFrame([[tarea, responsable, prioridad, estado, fecha, soporte_path]],
-                             columns=df.columns)
+        # Aseguramos que las columnas estén bien ordenadas y los valores correctos
+        nueva = pd.DataFrame([[tarea, responsable, str(fecha), soporte_path, "Alta", "En curso", False]],
+                             columns=["Tarea", "Responsable", "Fecha Límite", "Soporte", "Prioridad", "Estado", "Finalizada"])
+        
+        # Añadimos la nueva tarea al DataFrame y lo guardamos
         df = pd.concat([df, nueva], ignore_index=True)
         df.to_csv(ARCHIVO, index=False)
         st.success("✅ Tarea agregada con éxito")
         st.rerun()
 
 # ==========================
-# Cambiar estado de tareas y agregar soportes
+# Buscar tarea y mostrar soportes
 # ==========================
-st.subheader("✏️ Actualizar tarea")
-if not df.empty:
-    tarea_selec = st.selectbox("Seleccionar tarea:", df["Tarea"], key="editar_tarea")
-    nuevo_estado = st.selectbox("Nuevo estado:", ["Pendiente", "En curso", "Terminado"], key="editar_estado")
-    nuevo_soporte = st.file_uploader("📎 Adjuntar nuevo soporte", type=["pdf", "png", "jpg", "jpeg", "docx", "xlsx"], key="editar_soporte")
+st.subheader("🔍 Buscar tareas y ver soportes")
 
-    if st.button("Actualizar", key="boton_actualizar"):
-        # Actualizar estado
-        df.loc[df["Tarea"] == tarea_selec, "Estado"] = nuevo_estado
+# Crear un buscador de tareas
+tarea_selec = st.selectbox("Seleccionar tarea:", df["Tarea"])
 
-        # Si cargó un nuevo soporte
-        if nuevo_soporte is not None:
-            soporte_path = os.path.join(CARPETA_SOPORTES, nuevo_soporte.name)
-            with open(soporte_path, "wb") as f:
-                f.write(nuevo_soporte.getbuffer())
-
-            # Agregar al listado existente
-            idx = df[df["Tarea"] == tarea_selec].index[0]
-            soportes_actuales = str(df.at[idx, "Soporte"]) if pd.notna(df.at[idx, "Soporte"]) else ""
-            if soportes_actuales.strip() == "":
-                df.at[idx, "Soporte"] = soporte_path
-            else:
-                df.at[idx, "Soporte"] = soportes_actuales + ";" + soporte_path
-
-        # Guardar cambios
-        df.to_csv(ARCHIVO, index=False)
-        st.success("✅ Tarea actualizada con éxito")
-        st.rerun()
-
-
-# ==========================
-# Descargar soportes discriminados por tarea
-# ==========================
-st.subheader("📂 Soportes por tarea")
-
-for i, row in df.iterrows():
-    soportes_str = str(row["Soporte"]) if pd.notna(row["Soporte"]) else ""
+# Mostrar soportes de la tarea seleccionada
+if tarea_selec:
+    soportes_str = str(df[df["Tarea"] == tarea_selec]["Soporte"].values[0]) if pd.notna(df[df["Tarea"] == tarea_selec]["Soporte"].values[0]) else ""
     soportes = [s for s in soportes_str.split(";") if s.strip() != ""]
-
+    
     if soportes:
-        st.write(f"**{row['Tarea']}**")
-        for j, soporte_path in enumerate(soportes):
+        st.write(f"**Soportes de la tarea '{tarea_selec}':**")
+        for soporte_path in soportes:
             if os.path.exists(soporte_path):
                 with open(soporte_path, "rb") as f:
                     st.download_button(
                         label=f"⬇️ {os.path.basename(soporte_path)}",
                         data=f,
                         file_name=os.path.basename(soporte_path),
-                        key=f"descargar_{i}_{j}"
+                        key=f"descargar_{soporte_path}"
                     )
+
+# ==========================
+# Finalizar tarea
+# ==========================
+st.subheader("✅ Finalizar tarea")
+
+tarea_finalizar = st.selectbox("Seleccionar tarea para finalizar:", df[df["Finalizada"] == False]["Tarea"])
+
+if tarea_finalizar:
+    if st.button("Finalizar tarea"):
+        # Marcar tarea como finalizada
+        df.loc[df["Tarea"] == tarea_finalizar, "Finalizada"] = True
+        df.to_csv(ARCHIVO, index=False)
+        st.success("✅ Tarea finalizada correctamente")
+        st.rerun()
+
+
